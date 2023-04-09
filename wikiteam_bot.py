@@ -45,14 +45,14 @@ def main():
         
         wtitle = page.title()
         wtext = page.text
-        wtext_witout_ia = False
+        ia_in_wikitext = False
         
         #if not wtitle.startswith('5'):
         #    continue
         
         if '|Internet Archive' in wtext:
             print('It has IA parameter')
-            wtext_witout_ia = True
+            ia_in_wikitext = True
         #     pass
         # else:
             print('\n','#'*50,'\n',wtitle,'\n','#'*50)
@@ -118,7 +118,7 @@ def main():
             dump_size = item_files[0][1]
             
 
-            if wtext_witout_ia:
+            if ia_in_wikitext:
                 # remove old IA parameters
                 print('Removing old IA parameters')
                 wtext = page.text
@@ -148,7 +148,7 @@ def main():
 
             pywikibot.showDiff(page.text, newtext)
             page.text = newtext
-            edit_type = 'Adding' if wtext_witout_ia else 'Updating'
+            edit_type = 'Updating' if ia_in_wikitext else 'Adding'
             # print('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size))
             page.save('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size), botflag=True)
             
