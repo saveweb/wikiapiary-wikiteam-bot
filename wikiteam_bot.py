@@ -149,8 +149,8 @@ def main():
             pywikibot.showDiff(page.text, newtext)
             page.text = newtext
             edit_type = 'Adding' if wtext_witout_ia else 'Updating'
-            print('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size))
-            # page.save('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size), botflag=True)
+            # print('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size))
+            page.save('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size), botflag=True)
             
 
 if __name__ == "__main__":
