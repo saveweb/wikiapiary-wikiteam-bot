@@ -15,16 +15,22 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import re
-import requests
+import time
 
 import pywikibot
 import pywikibot.pagegenerators, pywikibot.config
 from internetarchive.session import ArchiveSession
 from internetarchive.search import Search
-# import urllib.parse
+
+from utils.database import BotDB
+from utils.session import createSession
+
+
+UPDATE_INTERVAL = 86400 * 14 # 14 days
 
 def main():
-    session = requests.Session() # requests session
+    db = BotDB()
+    session = createSession() # requests session
     ia_session = ArchiveSession() # internetarchive session
     site = pywikibot.Site('wikiapiary', 'wikiapiary')
     print('Logging in as %s' % (site.username()))
@@ -42,116 +48,125 @@ def main():
     for page in pre:
         if page.isRedirectPage():
             continue
-        
+
         wtitle = page.title()
+        w_page_id = int(page.pageid)
+
+        print('####################', w_page_id, ':', wtitle, '####################')
+
+        if (db.isExiest(w_page_id)
+            and db.get_last_success_check_timestamp(w_page_id) > time.time() - UPDATE_INTERVAL): # 24 hours
+            print(f'pid: {w_page_id}, title: {wtitle} is already checked in last {UPDATE_INTERVAL/86400} days')
+            continue
+
         wtext = page.text
         ia_in_wikitext = False
-        
-        #if not wtitle.startswith('5'):
-        #    continue
-        
         if '|Internet Archive' in wtext:
             print('It has IA parameter')
             ia_in_wikitext = True
-        #     pass
-        # else:
-            print('\n','#'*50,'\n',wtitle,'\n','#'*50)
-            print('https://wikiapiary.com/wiki/%s' % (re.sub(' ', '_', wtitle)))
+        else:
             print('Missing IA parameter')
 
-            # continue
+
+        if re.search(r'(?i)API URL=http', wtext):
+            apiurl: str = re.findall(r'(?i)API URL=(http[^\n]+?)\n', wtext)[0]
+            print('API:', apiurl)
+        else:
+            print('No API found in WikiApiary, skiping')
+            continue
+
+        # continue
+        
+        indexurl = 'index.php'.join(apiurl.rsplit('api.php', 1))
+        print('Index:', indexurl)
+        # url_ia_search = 'https://archive.org/services/search/beta/page_production/'
+
+        ia_search_params = {
+            'sort': '-date',
+        }
+        query = f'(originalurl:"{apiurl}" OR originalurl:"{indexurl}")'
+        search = Search(ia_session, query=query,
+                        fields=['identifier', 'addeddate', 'subject', 'uploader'],
+                        sorts=['addeddate desc'], # newest first
+                        max_retries=5, # default 5
+                        )
+        item = None
+        for result in search:
+            print(result)
+            # {'identifier': 'wiki-wikiothingxyz-20230315',
+            # 'addeddate': '2023-03-15T01:42:12Z',
+            # 'subject': ['wiki', 'wikiteam', 'MediaWiki', .....]}
+            item = result
+            break
+        if item is None:
+            print('No dumps found at Internet Archive')
+            db.createPage(w_page_id) if not db.isExiest(w_page_id) else db.updatePageCheckDate(w_page_id)
+            continue
+
+        item_identifier = item['identifier']
+        item_url = 'https://archive.org/details/%s' % item_identifier
+        print('Item found:',item_url)
+        
+        metaurl = 'https://archive.org/download/%s/%s_files.xml' % (item_identifier, item_identifier)
+        r = session.get(metaurl)
+        r.raise_for_status()
+        raw2 = r.text
+        raw2 = raw2.split('</file>')
+        item_files = []
+        for raw2_ in raw2:
+            try:
+                x = re.findall(r'(?im)<file name="[^ ]+-(\d{8})-[^ ]+" source="original">', raw2_)[0]
+                y = re.findall(r'(?im)<size>(\d+)</size>', raw2_)[0]
+                item_files.append([int(x), int(y)])
+            except:
+                pass
             
-            if re.search(r'(?i)API URL=http', wtext):
-                apiurl = re.findall(r'(?i)API URL=(http[^\n]+?)\n', wtext)[0]
-                print('API:', apiurl)
-            else:
-                print('No API found in WikiApiary, skiping')
-                continue
+        item_files.sort(reverse=True)
+        print(item_files)
+        item_date = str(item_files[0][0])[0:4] + '/' + str(item_files[0][0])[4:6] + '/' + str(item_files[0][0])[6:8]
+        dump_size = item_files[0][1]
+        
 
-            # continue
-            
-            indexurl = 'index.php'.join(apiurl.rsplit('api.php', 1))
-            print('Index:', indexurl)
-            # url_ia_search = 'https://archive.org/services/search/beta/page_production/'
+        if ia_in_wikitext:
+            # remove old IA parameters
+            print('Removing old IA parameters')
+            wtext = page.text
+            wtext = re.sub(r'(?im)\|Internet Archive identifier=[^\n]+?\n', '', wtext)
+            wtext = re.sub(r'(?im)\|Internet Archive URL=[^\n]+?\n', '', wtext)
+            wtext = re.sub(r'(?im)\|Internet Archive added date=[^\n]+?\n', '', wtext)
+            wtext = re.sub(r'(?im)\|Internet Archive file size=[^\n]+?\n', '', wtext)
+            # wtext = re.sub(r'(?im)\n\}\}', '\n}}', wtext)
 
-            ia_search_params = {
-                'sort': '-date',
-            }
-            query = f'(originalurl:"{apiurl}" OR originalurl:"{indexurl}")'
-            search = Search(ia_session, query=query,
-                            fields=['identifier', 'addeddate', 'subject', 'uploader'],
-                            sorts=['addeddate desc'] # newest first
-                            )
-            item = None
-            for result in search:
-                print(result)
-                # {'identifier': 'wiki-wikiothingxyz-20230315',
-                # 'addeddate': '2023-03-15T01:42:12Z',
-                # 'subject': ['wiki', 'wikiteam', 'MediaWiki', .....]}
-                item = result
-                break
-            if item is None:
-                print('No dumps found at Internet Archive')
-                continue
-
-            item_identifier = item['identifier']
-            item_url = 'https://archive.org/details/%s' % item_identifier
-            print('Item found:',item_url)
-            
-            metaurl = 'https://archive.org/download/%s/%s_files.xml' % (item_identifier, item_identifier)
-            r = session.get(metaurl)
-            r.raise_for_status()
-            raw2 = r.text
-            raw2 = raw2.split('</file>')
-            item_files = []
-            for raw2_ in raw2:
-                try:
-                    x = re.findall(r'(?im)<file name="[^ ]+-(\d{8})-[^ ]+" source="original">', raw2_)[0]
-                    y = re.findall(r'(?im)<size>(\d+)</size>', raw2_)[0]
-                    item_files.append([int(x), int(y)])
-                except:
-                    pass
-                
-            item_files.sort(reverse=True)
-            print(item_files)
-            item_date = str(item_files[0][0])[0:4] + '/' + str(item_files[0][0])[4:6] + '/' + str(item_files[0][0])[6:8]
-            dump_size = item_files[0][1]
-            
-
-            if ia_in_wikitext:
-                # remove old IA parameters
-                print('Removing old IA parameters')
-                wtext = page.text
-                wtext = re.sub(r'(?im)\|Internet Archive identifier=[^\n]+?\n', '', wtext)
-                wtext = re.sub(r'(?im)\|Internet Archive URL=[^\n]+?\n', '', wtext)
-                wtext = re.sub(r'(?im)\|Internet Archive added date=[^\n]+?\n', '', wtext)
-                wtext = re.sub(r'(?im)\|Internet Archive file size=[^\n]+?\n', '', wtext)
-                # wtext = re.sub(r'(?im)\n\}\}', '\n}}', wtext)
-
-            time_sufs = ['00:00:00 ','12:00:00 AM']
-            need_edit = True
-            for time_suf in time_sufs:
-                iaparams = """|Internet Archive identifier=%s
+        time_sufs = ['00:00:00 ','12:00:00 AM']
+        need_edit = True
+        for time_suf in time_sufs:
+            iaparams = """|Internet Archive identifier=%s
 |Internet Archive URL=%s
 |Internet Archive added date=%s %s
 |Internet Archive file size=%s""" % (item_identifier, item_url, item_date, time_suf, dump_size)
-                newtext = wtext
-                newtext = re.sub(r'(?im)\n\}\}', '\n%s\n}}' % (iaparams), newtext)
-                
-                if page.text == newtext:
-                    need_edit = False
-                    break
-
-            if not need_edit:
-                print('Same IA parameters, skiping...')
-                continue
-
-            pywikibot.showDiff(page.text, newtext)
-            page.text = newtext
-            edit_type = 'Updating' if ia_in_wikitext else 'Adding'
-            # print('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size))
-            page.save('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size), botflag=True)
+            newtext = wtext
+            newtext = re.sub(r'(?im)\n\}\}', '\n%s\n}}' % (iaparams), newtext)
             
+            if page.text == newtext:
+                need_edit = False
+                break
+
+        if not need_edit:
+            print('Same IA parameters, skiping...')
+            db.createPage(w_page_id) if not db.isExiest(w_page_id) else db.updatePageCheckDate(w_page_id)
+            db.set_identifier(w_page_id, item_identifier)
+            continue
+
+        pywikibot.showDiff(page.text, newtext)
+        page.text = newtext
+        edit_type = 'Updating' if ia_in_wikitext else 'Adding'
+        # print('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size))
+        page.save('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size), botflag=True)
+        db.createPage(w_page_id) if not db.isExiest(w_page_id) else db.updatePageCheckDate(w_page_id)
+        db.set_identifier(w_page_id, item_identifier)
+
+    print('-- Done --')
+    db.close()
 
 if __name__ == "__main__":
     main()
