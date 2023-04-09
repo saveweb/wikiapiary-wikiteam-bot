@@ -158,6 +158,15 @@ def main():
             continue
 
         pywikibot.showDiff(page.text, newtext)
+        if (newtext.count('|Internet Archive identifier=') > 1 or
+            newtext.count('|Internet Archive URL=') > 1        or
+            newtext.count('|Internet Archive added date=') > 1 or
+            newtext.count('|Internet Archive file size=') > 1
+            ):
+            print('Error: |Internet Archive parameters duplicated, you should fix it manually')
+            print('Skiping...')
+            continue
+
         page.text = newtext
         edit_type = 'Updating' if ia_in_wikitext else 'Adding'
         # print('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size))
