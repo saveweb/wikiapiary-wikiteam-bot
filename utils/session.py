@@ -2,6 +2,8 @@ import queue
 import requests
 import time
 
+from wikiteam_bot_config import REQ_SESSION_MAX_RETRIES
+
 def createSession():
     session = requests.Session()
     try:
@@ -47,7 +49,7 @@ def createSession():
                 time.sleep(backoff)
 
         __retries__ = CustomRetry(
-            total=5, backoff_factor=1.5,
+            total=REQ_SESSION_MAX_RETRIES, backoff_factor=1.5,
             status_forcelist=[500, 502, 503, 504, 429],
             allowed_methods=['DELETE', 'PUT', 'GET',
                              'OPTIONS', 'TRACE', 'HEAD', 'POST']

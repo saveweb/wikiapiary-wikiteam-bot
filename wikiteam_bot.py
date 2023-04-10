@@ -27,9 +27,7 @@ from rich import print
 
 from utils.database import BotDB
 from utils.session import createSession
-
-
-UPDATE_INTERVAL = 86400 * 14 # 14 days
+from wikiteam_bot_config import IA_MAX_RETRY, UPDATE_INTERVAL
 
 
 def need_stop():
@@ -98,7 +96,7 @@ def main():
         search = Search(ia_session, query=query,
                         fields=['identifier', 'addeddate', 'subject', 'originalurl', 'uploader'],
                         sorts=['addeddate desc'], # newest first
-                        max_retries=5, # default 5
+                        max_retries=IA_MAX_RETRY, # default 5
                         )
         item = None
         for result in search: # only get the first result
