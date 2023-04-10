@@ -16,17 +16,27 @@
 
 import re
 import time
+import os
+import urllib.parse
 
 import pywikibot
 import pywikibot.pagegenerators, pywikibot.config
 from internetarchive.session import ArchiveSession
 from internetarchive.search import Search
+from rich import print
 
 from utils.database import BotDB
 from utils.session import createSession
 
 
 UPDATE_INTERVAL = 86400 * 14 # 14 days
+
+
+def need_stop():
+    if os.path.exists('stop'):
+        return True
+    return False
+
 
 def main():
     db = BotDB()
@@ -46,13 +56,17 @@ def main():
     pywikibot.output('WikiApiary bot starting...')
 
     for page in pre:
+        if need_stop():
+            print('stop file found, exiting...')
+            break
         if page.isRedirectPage():
             continue
 
         wtitle = page.title()
         w_page_id = int(page.pageid)
 
-        print('####################', w_page_id, ':', wtitle, '####################')
+        print('####################', w_page_id, '####################')
+        print('"https://wikiapiary.com/wiki/%s"' % urllib.parse.quote(wtitle))
 
         if (db.isExiest(w_page_id)
             and db.get_last_success_check_timestamp(w_page_id) > time.time() - UPDATE_INTERVAL): # 24 hours
@@ -79,27 +93,27 @@ def main():
         
         indexurl = 'index.php'.join(apiurl.rsplit('api.php', 1))
         print('Index:', indexurl)
-        # url_ia_search = 'https://archive.org/services/search/beta/page_production/'
 
-        ia_search_params = {
-            'sort': '-date',
-        }
         query = f'(originalurl:"{apiurl}" OR originalurl:"{indexurl}")'
         search = Search(ia_session, query=query,
-                        fields=['identifier', 'addeddate', 'subject', 'uploader'],
+                        fields=['identifier', 'addeddate', 'subject', 'originalurl', 'uploader'],
                         sorts=['addeddate desc'], # newest first
                         max_retries=5, # default 5
                         )
         item = None
-        for result in search:
+        for result in search: # only get the first result
             print(result)
             # {'identifier': 'wiki-wikiothingxyz-20230315',
             # 'addeddate': '2023-03-15T01:42:12Z',
             # 'subject': ['wiki', 'wikiteam', 'MediaWiki', .....]}
+            if apiurl.lower == result['originalurl'].lower or indexurl.lower == result['originalurl'].lower:
+                print('Original URL not match, skiping...')
+                break
+
             item = result
             break
         if item is None:
-            print('No dumps found at Internet Archive')
+            print('No suitable dump found at Internet Archive')
             db.createPage(w_page_id) if not db.isExiest(w_page_id) else db.updatePageCheckDate(w_page_id)
             continue
 
@@ -175,7 +189,8 @@ def main():
         db.set_identifier(w_page_id, item_identifier)
 
     print('-- Done --')
-    db.close()
+    # close pywikibot http session
+    pywikibot.stopme()
 
 if __name__ == "__main__":
     main()

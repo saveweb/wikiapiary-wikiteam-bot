@@ -69,6 +69,7 @@ class BotDB:
         self.conn.commit()
 
     def close(self):
+        print('Closing DB connection...')
         self.conn.close()
 
     def __del__(self):
