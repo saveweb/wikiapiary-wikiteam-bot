@@ -143,10 +143,10 @@ def main():
             # remove old IA parameters
             print('Removing old IA parameters')
             wtext = page.text
-            wtext = re.sub(r'(?im)\|Internet Archive identifier=[^\n]+?\n', '', wtext)
-            wtext = re.sub(r'(?im)\|Internet Archive URL=[^\n]+?\n', '', wtext)
-            wtext = re.sub(r'(?im)\|Internet Archive added date=[^\n]+?\n', '', wtext)
-            wtext = re.sub(r'(?im)\|Internet Archive file size=[^\n]+?\n', '', wtext)
+            wtext = re.sub(r'(?im)\|Internet Archive identifier[^\n]*?\n', '', wtext)
+            wtext = re.sub(r'(?im)\|Internet Archive URL=[^\n]*?\n', '', wtext)
+            wtext = re.sub(r'(?im)\|Internet Archive added date=[^\n]*?\n', '', wtext)
+            wtext = re.sub(r'(?im)\|Internet Archive file size=[^\n]*?\n', '', wtext)
             # wtext = re.sub(r'(?im)\n\}\}', '\n}}', wtext)
 
         time_sufs = ['00:00:00 ','12:00:00 AM']
