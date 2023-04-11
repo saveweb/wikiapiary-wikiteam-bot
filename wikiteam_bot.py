@@ -18,16 +18,30 @@ import re
 import time
 import os
 import urllib.parse
+import threading
+
 
 import pywikibot
 import pywikibot.pagegenerators, pywikibot.config
 from internetarchive.session import ArchiveSession
 from internetarchive.search import Search
-from rich import print
+import requests
+# from rich import print
+from rich import print as rich_print
 
 from utils.database import BotDB
 from utils.session import createSession
-from wikiteam_bot_config import IA_MAX_RETRY, UPDATE_INTERVAL
+from wikiteam_bot_config import IA_MAX_RETRY, THREAD_NUM, UPDATE_INTERVAL
+
+
+print_lock = threading.Lock()
+def print_with_lock_and_thread(*args, **kwargs):
+    print_lock.acquire()
+    rich_print('thread %s' % threading.current_thread().name, end=': ')
+    rich_print(*args, **kwargs)
+    print_lock.release()
+
+print = print_with_lock_and_thread
 
 
 def need_stop():
@@ -35,9 +49,54 @@ def need_stop():
         return True
     return False
 
+def resume_title():
+    if not os.path.exists('resume.txt'):
+        return None
+
+    with open('resume.txt', 'r', encoding='utf-8') as f:
+        title = f.read().splitlines()
+        if title:
+            return title[0]
+    return None
+
+write_lock = threading.Lock()
+def write_resume_title(title):
+    write_lock.acquire()
+    with open('resume.txt', 'w', encoding='utf-8') as f:
+        f.write(title)
+    write_lock.release()
+
+def insert_iaparams_to_wikitext(iaparams: str, wikitext: str):
+    """find the end of {{Website template in wikitext, and insert params"""
+
+    if wikitext.count("{{Website") > 1:
+        print('Warning: multiple {{Website}} templates found, please check manually. skippping...')
+        return None
+
+    start = wikitext.find("{{Website")
+    end = None
+    count = 0
+    for i in range(start, len(wikitext)):
+        if wikitext[i] == "{":
+            count += 1
+        elif wikitext[i] == "}":
+            count -= 1
+            if count == 0:
+                end = i
+                break
+
+    if end is None:
+        print('Warning: no matching "}}" found, please check manually. skippping...')
+        return None
+
+    target = end - 2
+    
+    # insert params to the end of {{Website template
+    return wikitext[:target] + "\n" + iaparams + wikitext[target:]
 
 def main():
     db = BotDB()
+    db.createDB()
     session = createSession() # requests session
     ia_session = ArchiveSession() # internetarchive session
     site = pywikibot.Site('wikiapiary', 'wikiapiary')
@@ -45,14 +104,20 @@ def main():
     site.login()
     print('Logged in as %s' % (site.user()))
     catname = 'Category:Website'
+    start = resume_title() if resume_title() else '!'
+    print('start from', start)
 
     cat = pywikibot.Category(site, catname)
-    gen = pywikibot.pagegenerators.CategorizedPageGenerator(cat, start='!')
+    gen = pywikibot.pagegenerators.CategorizedPageGenerator(cat, start=start)
     pre = pywikibot.pagegenerators.PreloadingGenerator(gen)
     
     # print bot information
     pywikibot.output('WikiApiary bot starting...')
 
+    threads = []
+
+    lowest_page_title = None
+    offset = 0
     for page in pre:
         if need_stop():
             print('stop file found, exiting...')
@@ -60,16 +125,41 @@ def main():
         if page.isRedirectPage():
             continue
 
+        threads.append(threading.Thread(target=check_page, args=(page, db, session, ia_session)))
+        threads[-1].start()
+        while len(threads) >= THREAD_NUM:
+            for t in threads:
+                if not t.is_alive():
+                    threads.remove(t)
+            time.sleep(1)
+
+        offset += 1
+        if offset % THREAD_NUM == 0:
+            lowest_page_title = page.title()
+            write_resume_title(lowest_page_title)
+
+
+    # close pywikibot http session
+    pywikibot.stopme()
+
+    if not need_stop():
+        # complete. not stoped by user, remove resume.txt
+        print('-- Done --')
+        os.remove('resume.txt')
+
+
+def check_page(page, db: BotDB, session: requests.Session, ia_session: ArchiveSession):
         wtitle = page.title()
         w_page_id = int(page.pageid)
-
+        # print thread name
+        # print(threading.current_thread().name)
         print('####################', w_page_id, '####################')
         print('"https://wikiapiary.com/wiki/%s"' % urllib.parse.quote(wtitle))
 
         if (db.isExiest(w_page_id)
             and db.get_last_success_check_timestamp(w_page_id) > time.time() - UPDATE_INTERVAL): # 24 hours
             print(f'pid: {w_page_id}, title: {wtitle} is already checked in last {UPDATE_INTERVAL/86400} days')
-            continue
+            return # skip
 
         wtext = page.text
         ia_in_wikitext = False
@@ -85,7 +175,7 @@ def main():
             print('API:', apiurl)
         else:
             print('No API found in WikiApiary, skiping')
-            continue
+            return # skip
 
         # continue
         
@@ -113,7 +203,7 @@ def main():
         if item is None:
             print('No suitable dump found at Internet Archive')
             db.createPage(w_page_id) if not db.isExiest(w_page_id) else db.updatePageCheckDate(w_page_id)
-            continue
+            return # skip
 
         item_identifier = item['identifier']
         item_url = 'https://archive.org/details/%s' % item_identifier
@@ -151,23 +241,31 @@ def main():
 
         time_sufs = ['00:00:00 ','12:00:00 AM']
         need_edit = True
+        newtext = None
         for time_suf in time_sufs:
             iaparams = """|Internet Archive identifier=%s
 |Internet Archive URL=%s
 |Internet Archive added date=%s %s
 |Internet Archive file size=%s""" % (item_identifier, item_url, item_date, time_suf, dump_size)
-            newtext = wtext
-            newtext = re.sub(r'(?im)\n\}\}', '\n%s\n}}' % (iaparams), newtext)
-            
+            # newtext = re.sub(r'(?im)\n\}\}', '\n%s\n}}' % (iaparams), newtext)
+            newtext = insert_iaparams_to_wikitext(iaparams=iaparams, wikitext=wtext)
+            if newtext is None:
+                need_edit = False
+                break
+
             if page.text == newtext:
                 need_edit = False
                 break
+
+        if newtext is None:
+            print('Skiping...')
+            return
 
         if not need_edit:
             print('Same IA parameters, skiping...')
             db.createPage(w_page_id) if not db.isExiest(w_page_id) else db.updatePageCheckDate(w_page_id)
             db.set_identifier(w_page_id, item_identifier)
-            continue
+            return # skip
 
         pywikibot.showDiff(page.text, newtext)
         if (newtext.count('|Internet Archive identifier=') > 1 or
@@ -177,7 +275,7 @@ def main():
             ):
             print('Error: |Internet Archive parameters duplicated, you should fix it manually')
             print('Skiping...')
-            continue
+            return # skip
 
         page.text = newtext
         edit_type = 'Updating' if ia_in_wikitext else 'Adding'
@@ -186,9 +284,6 @@ def main():
         db.createPage(w_page_id) if not db.isExiest(w_page_id) else db.updatePageCheckDate(w_page_id)
         db.set_identifier(w_page_id, item_identifier)
 
-    print('-- Done --')
-    # close pywikibot http session
-    pywikibot.stopme()
 
 if __name__ == "__main__":
     main()
