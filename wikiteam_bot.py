@@ -30,9 +30,11 @@ import requests
 from rich import print as rich_print
 
 from utils.database import BotDB
+from utils.delay_write_page import delay_write_page, set_last_page_write_time
 from utils.session import createSession
+from utils.util import need_stop, resume_title, write_resume_title
+from utils.wikitext import insert_iaparams_to_wikitext
 from wikiteam_bot_config import IA_MAX_RETRY, THREAD_NUM, UPDATE_INTERVAL
-
 
 print_lock = threading.Lock()
 def print_with_lock_and_thread(*args, **kwargs):
@@ -44,61 +46,12 @@ def print_with_lock_and_thread(*args, **kwargs):
 print = print_with_lock_and_thread
 
 
-def need_stop():
-    if os.path.exists('stop'):
-        return True
-    return False
-
-def resume_title():
-    if not os.path.exists('resume.txt'):
-        return None
-
-    with open('resume.txt', 'r', encoding='utf-8') as f:
-        title = f.read().splitlines()
-        if title:
-            return title[0]
-    return None
-
-write_lock = threading.Lock()
-def write_resume_title(title):
-    write_lock.acquire()
-    with open('resume.txt', 'w', encoding='utf-8') as f:
-        f.write(title)
-    write_lock.release()
-
-def insert_iaparams_to_wikitext(iaparams: str, wikitext: str):
-    """find the end of {{Website template in wikitext, and insert params"""
-
-    if wikitext.count("{{Website") > 1:
-        print('Warning: multiple {{Website}} templates found, please check manually. skippping...')
-        return None
-
-    start = wikitext.find("{{Website")
-    end = None
-    count = 0
-    for i in range(start, len(wikitext)):
-        if wikitext[i] == "{":
-            count += 1
-        elif wikitext[i] == "}":
-            count -= 1
-            if count == 0:
-                end = i
-                break
-
-    if end is None:
-        print('Warning: no matching "}}" found, please check manually. skippping...')
-        return None
-
-    target = end - 2
-    
-    # insert params to the end of {{Website template
-    return wikitext[:target] + "\n" + iaparams + wikitext[target:]
-
 def main():
     db = BotDB()
     db.createDB()
     session = createSession() # requests session
     ia_session = ArchiveSession() # internetarchive session
+    session = ia_session
     site = pywikibot.Site('wikiapiary', 'wikiapiary')
     print('Logging in as %s' % (site.username()))
     site.login()
@@ -137,6 +90,7 @@ def main():
         if offset % THREAD_NUM == 0:
             lowest_page_title = page.title()
             write_resume_title(lowest_page_title)
+            offset = 0
 
 
     # close pywikibot http session
@@ -147,142 +101,151 @@ def main():
         print('-- Done --')
         os.remove('resume.txt')
 
+page_write_lock = threading.Lock()
 
 def check_page(page, db: BotDB, session: requests.Session, ia_session: ArchiveSession):
-        wtitle = page.title()
-        w_page_id = int(page.pageid)
-        # print thread name
-        # print(threading.current_thread().name)
-        print('####################', w_page_id, '####################')
-        print('"https://wikiapiary.com/wiki/%s"' % urllib.parse.quote(wtitle))
+    wtitle = page.title()
+    w_page_id = int(page.pageid)
+    # print thread name
+    # print(threading.current_thread().name)
+    print('####################', w_page_id, '####################')
+    print('"https://wikiapiary.com/wiki/%s"' % urllib.parse.quote(wtitle))
 
-        if (db.isExiest(w_page_id)
-            and db.get_last_success_check_timestamp(w_page_id) > time.time() - UPDATE_INTERVAL): # 24 hours
-            print(f'pid: {w_page_id}, title: {wtitle} is already checked in last {UPDATE_INTERVAL/86400} days')
-            return # skip
+    if (db.isExiest(w_page_id)
+        and db.get_last_success_check_timestamp(w_page_id) > time.time() - UPDATE_INTERVAL): # 24 hours
+        print(f'pid: {w_page_id}, title: {wtitle} is already checked in last {UPDATE_INTERVAL/86400} days')
+        return # skip
 
-        wtext = page.text
-        ia_in_wikitext = False
-        if '|Internet Archive' in wtext:
-            print('It has IA parameter')
-            ia_in_wikitext = True
-        else:
-            print('Missing IA parameter')
+    old_text = page.text
+    ia_in_wikitext = False
+    if '|Internet Archive' in old_text:
+        print('It has IA parameter')
+        ia_in_wikitext = True
+    else:
+        print('Missing IA parameter')
 
 
-        if re.search(r'(?i)API URL=http', wtext):
-            apiurl: str = re.findall(r'(?i)API URL=(http[^\n]+?)\n', wtext)[0]
-            print('API:', apiurl)
-        else:
-            print('No API found in WikiApiary, skiping')
-            return # skip
+    if re.search(r'(?i)API URL=http', old_text):
+        apiurl: str = re.findall(r'(?i)API URL=(http[^\n]+?)\n', old_text)[0]
+        print('API:', apiurl)
+    else:
+        print('No API found in WikiApiary, skiping')
+        return # skip
 
-        # continue
-        
-        indexurl = 'index.php'.join(apiurl.rsplit('api.php', 1))
-        print('Index:', indexurl)
+    # continue
+    
+    indexurl = 'index.php'.join(apiurl.rsplit('api.php', 1))
+    print('Index:', indexurl)
 
-        query = f'(originalurl:"{apiurl}" OR originalurl:"{indexurl}")'
-        search = Search(ia_session, query=query,
-                        fields=['identifier', 'addeddate', 'subject', 'originalurl', 'uploader'],
-                        sorts=['addeddate desc'], # newest first
-                        max_retries=IA_MAX_RETRY, # default 5
-                        )
-        item = None
-        for result in search: # only get the first result
-            print(result)
-            # {'identifier': 'wiki-wikiothingxyz-20230315',
-            # 'addeddate': '2023-03-15T01:42:12Z',
-            # 'subject': ['wiki', 'wikiteam', 'MediaWiki', .....]}
-            if apiurl.lower == result['originalurl'].lower or indexurl.lower == result['originalurl'].lower:
-                print('Original URL not match, skiping...')
-                break
-
-            item = result
+    query = f'(originalurl:"{apiurl}" OR originalurl:"{indexurl}")'
+    search = Search(ia_session, query=query,
+                    fields=['identifier', 'addeddate', 'subject', 'originalurl', 'uploader'],
+                    sorts=['addeddate desc'], # newest first
+                    max_retries=IA_MAX_RETRY, # default 5
+                    )
+    item = None
+    for result in search: # only get the first result
+        print(result)
+        # {'identifier': 'wiki-wikiothingxyz-20230315',
+        # 'addeddate': '2023-03-15T01:42:12Z',
+        # 'subject': ['wiki', 'wikiteam', 'MediaWiki', .....]}
+        if apiurl.lower == result['originalurl'].lower or indexurl.lower == result['originalurl'].lower:
+            print('Original URL not match, skiping...')
             break
-        if item is None:
-            print('No suitable dump found at Internet Archive')
-            db.createPage(w_page_id) if not db.isExiest(w_page_id) else db.updatePageCheckDate(w_page_id)
-            return # skip
 
-        item_identifier = item['identifier']
-        item_url = 'https://archive.org/details/%s' % item_identifier
-        print('Item found:',item_url)
+        item = result
+        break
+    if item is None:
+        print('No suitable dump found at Internet Archive')
+        db.createPage(w_page_id) if not db.isExiest(w_page_id) else db.updatePageCheckDate(w_page_id)
+        return # skip
+
+    item_identifier = item['identifier']
+    item_url = 'https://archive.org/details/%s' % item_identifier
+    print('Item found:',item_url)
+    
+    metaurl = 'https://archive.org/download/%s/%s_files.xml' % (item_identifier, item_identifier)
+    r = session.get(metaurl)
+    r.raise_for_status()
+    raw2 = r.text
+    raw2 = raw2.split('</file>')
+    item_files = []
+    for raw2_ in raw2:
+        try:
+            x = re.findall(r'(?im)<file name="[^ ]+-(\d{8})-[^ ]+" source="original">', raw2_)[0]
+            y = re.findall(r'(?im)<size>(\d+)</size>', raw2_)[0]
+            item_files.append([int(x), int(y)])
+        except:
+            pass
         
-        metaurl = 'https://archive.org/download/%s/%s_files.xml' % (item_identifier, item_identifier)
-        r = session.get(metaurl)
-        r.raise_for_status()
-        raw2 = r.text
-        raw2 = raw2.split('</file>')
-        item_files = []
-        for raw2_ in raw2:
-            try:
-                x = re.findall(r'(?im)<file name="[^ ]+-(\d{8})-[^ ]+" source="original">', raw2_)[0]
-                y = re.findall(r'(?im)<size>(\d+)</size>', raw2_)[0]
-                item_files.append([int(x), int(y)])
-            except:
-                pass
-            
-        item_files.sort(reverse=True)
-        print(item_files)
-        item_date = str(item_files[0][0])[0:4] + '/' + str(item_files[0][0])[4:6] + '/' + str(item_files[0][0])[6:8]
-        dump_size = item_files[0][1]
-        
+    item_files.sort(reverse=True)
+    print(item_files)
+    item_date = str(item_files[0][0])[0:4] + '/' + str(item_files[0][0])[4:6] + '/' + str(item_files[0][0])[6:8]
+    dump_size = item_files[0][1]
+    
+    old_text: str = page.text
+    if ia_in_wikitext:
+        # remove old IA parameters
+        print('Removing old IA parameters')
+        old_text = re.sub(r'(?im)\|Internet Archive identifier[^\n]*?\n', '', old_text)
+        old_text = re.sub(r'(?im)\|Internet Archive URL=[^\n]*?\n', '', old_text)
+        old_text = re.sub(r'(?im)\|Internet Archive added date=[^\n]*?\n', '', old_text)
+        old_text = re.sub(r'(?im)\|Internet Archive file size=[^\n]*?\n', '', old_text)
+        # wtext = re.sub(r'(?im)\n\}\}', '\n}}', wtext)
 
-        if ia_in_wikitext:
-            # remove old IA parameters
-            print('Removing old IA parameters')
-            wtext = page.text
-            wtext = re.sub(r'(?im)\|Internet Archive identifier[^\n]*?\n', '', wtext)
-            wtext = re.sub(r'(?im)\|Internet Archive URL=[^\n]*?\n', '', wtext)
-            wtext = re.sub(r'(?im)\|Internet Archive added date=[^\n]*?\n', '', wtext)
-            wtext = re.sub(r'(?im)\|Internet Archive file size=[^\n]*?\n', '', wtext)
-            # wtext = re.sub(r'(?im)\n\}\}', '\n}}', wtext)
-
-        time_sufs = ['00:00:00 ','12:00:00 AM']
-        need_edit = True
-        newtext = None
-        for time_suf in time_sufs:
-            iaparams = """|Internet Archive identifier=%s
+    time_sufs = ['00:00:00 ','12:00:00 AM']
+    need_edit = True
+    newtext = None
+    for time_suf in time_sufs:
+        iaparams = """|Internet Archive identifier=%s
 |Internet Archive URL=%s
 |Internet Archive added date=%s %s
 |Internet Archive file size=%s""" % (item_identifier, item_url, item_date, time_suf, dump_size)
-            # newtext = re.sub(r'(?im)\n\}\}', '\n%s\n}}' % (iaparams), newtext)
-            newtext = insert_iaparams_to_wikitext(iaparams=iaparams, wikitext=wtext)
-            if newtext is None:
-                need_edit = False
-                break
-
-            if page.text == newtext:
-                need_edit = False
-                break
-
+        # newtext = re.sub(r'(?im)\n\}\}', '\n%s\n}}' % (iaparams), newtext)
+        newtext = insert_iaparams_to_wikitext(iaparams=iaparams, wikitext=old_text)
         if newtext is None:
-            print('Skiping...')
-            return
+            need_edit = False
+            break
 
-        if not need_edit:
-            print('Same IA parameters, skiping...')
-            db.createPage(w_page_id) if not db.isExiest(w_page_id) else db.updatePageCheckDate(w_page_id)
-            db.set_identifier(w_page_id, item_identifier)
-            return # skip
+        if newtext == old_text:
+            need_edit = False
+            break
 
-        pywikibot.showDiff(page.text, newtext)
-        if (newtext.count('|Internet Archive identifier=') > 1 or
-            newtext.count('|Internet Archive URL=') > 1        or
-            newtext.count('|Internet Archive added date=') > 1 or
-            newtext.count('|Internet Archive file size=') > 1
-            ):
-            print('Error: |Internet Archive parameters duplicated, you should fix it manually')
-            print('Skiping...')
-            return # skip
+        if iaparams in old_text:
+            need_edit = False
+            break
 
-        page.text = newtext
-        edit_type = 'Updating' if ia_in_wikitext else 'Adding'
-        # print('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size))
-        page.save('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size), botflag=True)
+    if newtext is None:
+        print('Skiping...')
+        return
+
+    if not need_edit:
+        print('Same IA parameters, skiping...')
         db.createPage(w_page_id) if not db.isExiest(w_page_id) else db.updatePageCheckDate(w_page_id)
         db.set_identifier(w_page_id, item_identifier)
+        return # skip
+
+    pywikibot.showDiff(page.text, newtext)
+    if (newtext.count('|Internet Archive identifier=') > 1 or
+        newtext.count('|Internet Archive URL=') > 1        or
+        newtext.count('|Internet Archive added date=') > 1 or
+        newtext.count('|Internet Archive file size=') > 1
+        ):
+        print('Error: |Internet Archive parameters duplicated, you should fix it manually')
+        print('Skiping...')
+        return # skip
+
+    page.text = newtext
+    edit_type = 'Updating' if ia_in_wikitext else 'Adding'
+    # print('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size))
+    page_write_lock.acquire()
+    delay_write_page()
+    page.save('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size), botflag=True)
+    set_last_page_write_time()
+    page_write_lock.release()
+
+    db.createPage(w_page_id) if not db.isExiest(w_page_id) else db.updatePageCheckDate(w_page_id)
+    db.set_identifier(w_page_id, item_identifier)
 
 
 if __name__ == "__main__":
