@@ -70,7 +70,7 @@ def main():
     threads = []
 
     lowest_page_title = None
-    offset = 0
+    offset = THREAD_NUM
     for page in pre:
         if need_stop():
             print('stop file found, exiting...')
@@ -86,11 +86,11 @@ def main():
                     threads.remove(t)
             time.sleep(1)
 
-        offset += 1
-        if offset % THREAD_NUM == 0:
+        offset -= 1
+        if offset == 0:
             lowest_page_title = page.title()
             write_resume_title(lowest_page_title)
-            offset = 0
+            offset = THREAD_NUM
 
 
     # close pywikibot http session
@@ -240,8 +240,8 @@ def check_page(page, db: BotDB, session: requests.Session, ia_session: ArchiveSe
     # print('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size))
     page_write_lock.acquire()
     delay_write_page()
-    page.save('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size), botflag=True)
     set_last_page_write_time()
+    page.save('BOT - %s dump details: %s, %s, %s bytes' % (edit_type ,item_identifier, item_date, dump_size), botflag=True)
     page_write_lock.release()
 
     db.createPage(w_page_id) if not db.isExiest(w_page_id) else db.updatePageCheckDate(w_page_id)

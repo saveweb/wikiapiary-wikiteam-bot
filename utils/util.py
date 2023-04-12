@@ -4,7 +4,6 @@ import threading
 
 def need_stop():
     if os.path.exists('stop'):
-        os.remove('stop')
         return True
     return False
 
